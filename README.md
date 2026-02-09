@@ -70,6 +70,7 @@ These control what gets removed from the scene before export. **All default to `
 | `removeLineObjects` | `boolean` | `true` | Removes `LineSegments`, `Line2`, and `Line` objects (selection outlines, highlights) |
 | `removeWireframeMeshes` | `boolean` | `true` | Removes meshes where all materials have `wireframe: true`. GLTF does not support wireframe rendering, so these would export as solid filled geometry |
 | `assignReadableNames` | `boolean` | `true` | Auto-names unnamed objects based on their geometry type and material color (e.g. `Box_#ff6600`, `Sphere_#ffffff`). Objects that already have a name are left untouched |
+| `mergeMeshesInGroups` | `boolean` | `true` | Merges all meshes inside each group into a single mesh. This **protects your geometry details** from being accessed by clients - they can't see or modify individual components. Set to `false` to export all individual meshes |
 
 ### Example with Custom Props
 
@@ -77,9 +78,10 @@ These control what gets removed from the scene before export. **All default to `
 <ExportButton
   filename="my-scene"
   position="bottom-left"
-  removeLights={false}       // keep lights in the export
-  removeCSGChildren={false}  // keep CSG child meshes
-  assignReadableNames={false} // keep original Three.js names
+  removeLights={false}         // keep lights in the export
+  removeCSGChildren={false}    // keep CSG child meshes
+  assignReadableNames={false}  // keep original Three.js names
+  mergeMeshesInGroups={false}  // keep individual meshes (don't merge)
 />
 ```
 
@@ -188,6 +190,7 @@ Here's what each cleanup option removes and why:
 | GridHelper, AxesHelper in export | `removeHelpers` | Development helpers shouldn't appear in production exports |
 | Selection outlines in export | `removeLineObjects` | Line-based highlights and outlines from the editor |
 | Generic `Node_0`, `Obj_1` names | `assignReadableNames` | Three.js doesn't name objects by default, so GLTFExporter generates generic names |
+| Clients can see/copy mesh details | `mergeMeshesInGroups` | Merges all meshes in each group into one, so the internal geometry structure is hidden and clients can't access or copy individual components |
 
 ## License
 

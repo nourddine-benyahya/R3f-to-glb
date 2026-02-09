@@ -56,7 +56,7 @@ export interface ExportButtonProps extends PrepareSceneOptions {
  * All scene cleanup options from `PrepareSceneOptions` are accepted as props
  * (removeHelpers, removeCameras, removeLights, removeCSGChildren,
  * removeInvisibleMeshes, removeLineObjects, removeWireframeMeshes,
- * assignReadableNames). They all default to `true`.
+ * assignReadableNames, mergeMeshesInGroups). They all default to `true`.
  */
 export const ExportButton: React.FC<ExportButtonProps> = ({
   filename = 'scene',
@@ -69,6 +69,7 @@ export const ExportButton: React.FC<ExportButtonProps> = ({
   removeLineObjects = true,
   removeWireframeMeshes = true,
   assignReadableNames = true,
+  mergeMeshesInGroups = true,
   style,
   className,
   showStats = true,
@@ -98,6 +99,7 @@ export const ExportButton: React.FC<ExportButtonProps> = ({
         removeLineObjects,
         removeWireframeMeshes,
         assignReadableNames,
+        mergeMeshesInGroups,
       });
 
       if (showStats) {
@@ -127,7 +129,7 @@ export const ExportButton: React.FC<ExportButtonProps> = ({
     scene, filename, options,
     removeHelpers, removeCameras, removeLights, removeCSGChildren,
     removeInvisibleMeshes, removeLineObjects, removeWireframeMeshes,
-    assignReadableNames, isExporting, showStats,
+    assignReadableNames, mergeMeshesInGroups, isExporting, showStats,
   ]);
 
   const positionStyles: Record<string, React.CSSProperties> = {

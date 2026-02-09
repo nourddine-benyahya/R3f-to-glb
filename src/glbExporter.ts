@@ -17,6 +17,7 @@
 
 import * as THREE from 'three';
 import { GLTFExporter } from 'three-stdlib';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { saveAs } from 'file-saver';
 
 /**
@@ -196,6 +197,12 @@ export interface PrepareSceneOptions {
   removeWireframeMeshes?: boolean;
   /** Assign readable names to unnamed objects. Default: true */
   assignReadableNames?: boolean;
+  /**
+   * Merge all meshes inside each group into a single mesh.
+   * This hides internal geometry details and prevents clients from
+   * accessing individual mesh components. Default: true
+   */
+  mergeMeshesInGroups?: boolean;
 }
 
 /**
@@ -224,6 +231,7 @@ export function prepareSceneForExport(
     removeLineObjects = true,
     removeWireframeMeshes = true,
     assignReadableNames = true,
+    mergeMeshesInGroups = true,
   } = options;
 
   const clone = scene.clone(true);
@@ -348,6 +356,85 @@ export function prepareSceneForExport(
         child.name = getUniqueName(base);
       } else if (child instanceof THREE.Group || child.type === 'Object3D') {
         child.name = getUniqueName('Group');
+      }
+    });
+  }
+
+  // Merge meshes inside groups to hide internal details
+  // This prevents clients from accessing individual mesh components
+  if (mergeMeshesInGroups) {
+    const processGroup = (group: THREE.Object3D): void => {
+      // First, recursively process child groups
+      const childGroups = group.children.filter(
+        (c) => c instanceof THREE.Group || (c.type === 'Object3D' && !(c instanceof THREE.Mesh))
+      );
+      childGroups.forEach((g) => processGroup(g));
+
+      // Collect all direct mesh children of this group
+      const meshChildren = group.children.filter((c) => c instanceof THREE.Mesh) as THREE.Mesh[];
+
+      // Only merge if there are multiple meshes
+      if (meshChildren.length <= 1) return;
+
+      // Group meshes by material to preserve different materials
+      const meshesByMaterial = new Map<string, THREE.Mesh[]>();
+
+      meshChildren.forEach((mesh) => {
+        const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+        const matId = mat?.uuid || 'default';
+        if (!meshesByMaterial.has(matId)) {
+          meshesByMaterial.set(matId, []);
+        }
+        meshesByMaterial.get(matId)!.push(mesh);
+      });
+
+      // Merge meshes for each material group
+      meshesByMaterial.forEach((meshes, matId) => {
+        if (meshes.length <= 1) return;
+
+        // Prepare geometries with world transforms applied
+        const geometries: THREE.BufferGeometry[] = [];
+        const material = Array.isArray(meshes[0].material) ? meshes[0].material[0] : meshes[0].material;
+
+        meshes.forEach((mesh) => {
+          const geo = mesh.geometry.clone();
+          // Apply mesh's world matrix to geometry
+          mesh.updateWorldMatrix(true, false);
+          geo.applyMatrix4(mesh.matrixWorld);
+          geometries.push(geo);
+        });
+
+        // Merge all geometries into one
+        const mergedGeometry = BufferGeometryUtils.mergeGeometries(geometries, false);
+
+        if (mergedGeometry) {
+          // Create merged mesh at world origin (since we applied world matrices)
+          const mergedMesh = new THREE.Mesh(mergedGeometry, material);
+          mergedMesh.name = group.name ? `${group.name}_merged` : `Merged_${matId.slice(0, 8)}`;
+
+          // Apply inverse of group's world matrix to bring mesh into group's local space
+          group.updateWorldMatrix(true, false);
+          const inverseParentMatrix = group.matrixWorld.clone().invert();
+          mergedGeometry.applyMatrix4(inverseParentMatrix);
+
+          // Remove original meshes
+          meshes.forEach((mesh) => mesh.removeFromParent());
+
+          // Add merged mesh to group
+          group.add(mergedMesh);
+
+          console.log(`[GLB Export] Merged ${meshes.length} meshes in "${group.name || 'unnamed'}" into "${mergedMesh.name}"`);
+        }
+
+        // Cleanup cloned geometries
+        geometries.forEach((g) => g.dispose());
+      });
+    };
+
+    // Process all groups in the scene
+    clone.children.forEach((child) => {
+      if (child instanceof THREE.Group || (child.type === 'Object3D' && !(child instanceof THREE.Mesh))) {
+        processGroup(child);
       }
     });
   }
