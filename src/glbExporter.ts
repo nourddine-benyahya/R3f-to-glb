@@ -360,29 +360,55 @@ export function prepareSceneForExport(
     });
   }
 
-  // Merge all descendant meshes inside each group into a single mesh.
-  // This hides internal geometry details so clients can't access
-  // individual components. Group/zone names are preserved.
+  // Merge meshes only at the deepest (leaf) groups in the tree.
+  // This keeps the full group hierarchy navigable (you can move each
+  // group independently in Blender) but hides internal mesh details.
+  //
+  // Example: Group(Wall_1) → Group(Part_A) → [Mesh, Mesh, Mesh]
+  //   - Wall_1 stays as a group (movable)
+  //   - Part_A stays as a group (movable)
+  //   - The 3 meshes inside Part_A get merged into 1
   if (mergeMeshesInGroups) {
     const processGroup = (group: THREE.Object3D): void => {
-      // Collect ALL descendant meshes (deep traverse, not just direct children)
-      const allMeshes: THREE.Mesh[] = [];
+      // Find child groups (not meshes)
+      const childGroups = group.children.filter(
+        (c) => (c instanceof THREE.Group || c.type === 'Object3D') && !(c instanceof THREE.Mesh)
+      );
+
+      // Recurse into child groups first (bottom-up)
+      childGroups.forEach((g) => processGroup(g));
+
+      // Check if this group has any child groups that contain meshes.
+      // If it does, this is NOT a leaf group — don't merge here, the
+      // recursion above already handled the deeper groups.
+      const hasChildGroupsWithMeshes = childGroups.some((g) => {
+        let hasMesh = false;
+        g.traverse((c) => {
+          if (c instanceof THREE.Mesh) hasMesh = true;
+        });
+        return hasMesh;
+      });
+
+      if (hasChildGroupsWithMeshes) return;
+
+      // This is a leaf group — collect its direct and nested meshes
+      const meshes: THREE.Mesh[] = [];
       group.traverse((child) => {
         if (child instanceof THREE.Mesh && child !== group) {
-          allMeshes.push(child);
+          meshes.push(child);
         }
       });
 
       // Only merge if there are multiple meshes
-      if (allMeshes.length <= 1) return;
+      if (meshes.length <= 1) return;
 
       // Prepare geometries with world transforms applied
       const geometries: THREE.BufferGeometry[] = [];
-      const material = Array.isArray(allMeshes[0].material)
-        ? allMeshes[0].material[0]
-        : allMeshes[0].material;
+      const material = Array.isArray(meshes[0].material)
+        ? meshes[0].material[0]
+        : meshes[0].material;
 
-      allMeshes.forEach((mesh) => {
+      meshes.forEach((mesh) => {
         const geo = mesh.geometry.clone();
         mesh.updateWorldMatrix(true, false);
         geo.applyMatrix4(mesh.matrixWorld);
@@ -401,22 +427,23 @@ export function prepareSceneForExport(
         const inv = group.matrixWorld.clone().invert();
         mergedGeometry.applyMatrix4(inv);
 
-        // Clear all children (sub-groups and meshes) and add single merged mesh
+        // Clear all children and add single merged mesh
         group.clear();
         group.add(mergedMesh);
 
-        console.log(`[GLB Export] Merged ${allMeshes.length} meshes in "${group.name || 'unnamed'}" into "${mergedMesh.name}"`);
+        console.log(`[GLB Export] Merged ${meshes.length} meshes in "${group.name || 'unnamed'}" into "${mergedMesh.name}"`);
       }
 
       // Cleanup cloned geometries
       geometries.forEach((g) => g.dispose());
     };
 
-    // Process top-level groups (zones) to preserve zone structure
-    const topGroups = clone.children.filter(
-      (c) => c instanceof THREE.Group || (c.type === 'Object3D' && !(c instanceof THREE.Mesh))
-    );
-    topGroups.forEach((g) => processGroup(g));
+    // Start recursion from the scene root's children
+    clone.children.forEach((child) => {
+      if ((child instanceof THREE.Group || child.type === 'Object3D') && !(child instanceof THREE.Mesh)) {
+        processGroup(child);
+      }
+    });
   }
 
   console.log('[GLB Export] Scene structure AFTER cleanup:');
