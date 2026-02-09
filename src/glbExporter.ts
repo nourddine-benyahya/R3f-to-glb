@@ -360,83 +360,63 @@ export function prepareSceneForExport(
     });
   }
 
-  // Merge meshes inside groups to hide internal details
-  // This prevents clients from accessing individual mesh components
+  // Merge all descendant meshes inside each group into a single mesh.
+  // This hides internal geometry details so clients can't access
+  // individual components. Group/zone names are preserved.
   if (mergeMeshesInGroups) {
     const processGroup = (group: THREE.Object3D): void => {
-      // First, recursively process child groups
-      const childGroups = group.children.filter(
-        (c) => c instanceof THREE.Group || (c.type === 'Object3D' && !(c instanceof THREE.Mesh))
-      );
-      childGroups.forEach((g) => processGroup(g));
-
-      // Collect all direct mesh children of this group
-      const meshChildren = group.children.filter((c) => c instanceof THREE.Mesh) as THREE.Mesh[];
+      // Collect ALL descendant meshes (deep traverse, not just direct children)
+      const allMeshes: THREE.Mesh[] = [];
+      group.traverse((child) => {
+        if (child instanceof THREE.Mesh && child !== group) {
+          allMeshes.push(child);
+        }
+      });
 
       // Only merge if there are multiple meshes
-      if (meshChildren.length <= 1) return;
+      if (allMeshes.length <= 1) return;
 
-      // Group meshes by material to preserve different materials
-      const meshesByMaterial = new Map<string, THREE.Mesh[]>();
+      // Prepare geometries with world transforms applied
+      const geometries: THREE.BufferGeometry[] = [];
+      const material = Array.isArray(allMeshes[0].material)
+        ? allMeshes[0].material[0]
+        : allMeshes[0].material;
 
-      meshChildren.forEach((mesh) => {
-        const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-        const matId = mat?.uuid || 'default';
-        if (!meshesByMaterial.has(matId)) {
-          meshesByMaterial.set(matId, []);
-        }
-        meshesByMaterial.get(matId)!.push(mesh);
+      allMeshes.forEach((mesh) => {
+        const geo = mesh.geometry.clone();
+        mesh.updateWorldMatrix(true, false);
+        geo.applyMatrix4(mesh.matrixWorld);
+        geometries.push(geo);
       });
 
-      // Merge meshes for each material group
-      meshesByMaterial.forEach((meshes, matId) => {
-        if (meshes.length <= 1) return;
+      // Merge all geometries into one
+      const mergedGeometry = BufferGeometryUtils.mergeGeometries(geometries, false);
 
-        // Prepare geometries with world transforms applied
-        const geometries: THREE.BufferGeometry[] = [];
-        const material = Array.isArray(meshes[0].material) ? meshes[0].material[0] : meshes[0].material;
+      if (mergedGeometry) {
+        const mergedMesh = new THREE.Mesh(mergedGeometry, material);
+        mergedMesh.name = group.name ? `${group.name}_merged` : 'Merged';
 
-        meshes.forEach((mesh) => {
-          const geo = mesh.geometry.clone();
-          // Apply mesh's world matrix to geometry
-          mesh.updateWorldMatrix(true, false);
-          geo.applyMatrix4(mesh.matrixWorld);
-          geometries.push(geo);
-        });
+        // Transform back into the group's local space
+        group.updateWorldMatrix(true, false);
+        const inv = group.matrixWorld.clone().invert();
+        mergedGeometry.applyMatrix4(inv);
 
-        // Merge all geometries into one
-        const mergedGeometry = BufferGeometryUtils.mergeGeometries(geometries, false);
+        // Clear all children (sub-groups and meshes) and add single merged mesh
+        group.clear();
+        group.add(mergedMesh);
 
-        if (mergedGeometry) {
-          // Create merged mesh at world origin (since we applied world matrices)
-          const mergedMesh = new THREE.Mesh(mergedGeometry, material);
-          mergedMesh.name = group.name ? `${group.name}_merged` : `Merged_${matId.slice(0, 8)}`;
+        console.log(`[GLB Export] Merged ${allMeshes.length} meshes in "${group.name || 'unnamed'}" into "${mergedMesh.name}"`);
+      }
 
-          // Apply inverse of group's world matrix to bring mesh into group's local space
-          group.updateWorldMatrix(true, false);
-          const inverseParentMatrix = group.matrixWorld.clone().invert();
-          mergedGeometry.applyMatrix4(inverseParentMatrix);
-
-          // Remove original meshes
-          meshes.forEach((mesh) => mesh.removeFromParent());
-
-          // Add merged mesh to group
-          group.add(mergedMesh);
-
-          console.log(`[GLB Export] Merged ${meshes.length} meshes in "${group.name || 'unnamed'}" into "${mergedMesh.name}"`);
-        }
-
-        // Cleanup cloned geometries
-        geometries.forEach((g) => g.dispose());
-      });
+      // Cleanup cloned geometries
+      geometries.forEach((g) => g.dispose());
     };
 
-    // Process all groups in the scene
-    clone.children.forEach((child) => {
-      if (child instanceof THREE.Group || (child.type === 'Object3D' && !(child instanceof THREE.Mesh))) {
-        processGroup(child);
-      }
-    });
+    // Process top-level groups (zones) to preserve zone structure
+    const topGroups = clone.children.filter(
+      (c) => c instanceof THREE.Group || (c.type === 'Object3D' && !(c instanceof THREE.Mesh))
+    );
+    topGroups.forEach((g) => processGroup(g));
   }
 
   console.log('[GLB Export] Scene structure AFTER cleanup:');
