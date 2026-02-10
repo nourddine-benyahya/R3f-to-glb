@@ -7,8 +7,17 @@ export {
 export {
   exportToGLB,
   exportToGLBBlob,
+} from './export';
+
+export {
   prepareSceneForExport,
+} from './prepareScene';
+
+export {
   getSceneStats,
+} from './helpers/sceneStats';
+
+export {
   type GLBExportOptions,
   type PrepareSceneOptions,
-} from './glbExporter';
+} from './types';

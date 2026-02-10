@@ -26,13 +26,10 @@
 import React, { useState, useCallback } from 'react';
 import { useThree } from '@react-three/fiber';
 import { Html } from '@react-three/drei';
-import {
-  exportToGLB,
-  prepareSceneForExport,
-  getSceneStats,
-  type GLBExportOptions,
-  type PrepareSceneOptions,
-} from './glbExporter';
+import { exportToGLB } from './export';
+import { prepareSceneForExport } from './prepareScene';
+import { getSceneStats } from './helpers/sceneStats';
+import type { GLBExportOptions, PrepareSceneOptions } from './types';
 
 export interface ExportButtonProps extends PrepareSceneOptions {
   /** Filename without extension. Default: 'scene' */
