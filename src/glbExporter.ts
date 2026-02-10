@@ -663,13 +663,26 @@ export function prepareSceneForExport(
           );
         }
 
-        // Assign geometry groups – each maps a vertex range to a material
+        // Assign geometry groups – each maps an index range to a material
         let vertexOffset = 0;
         for (let i = 0; i < nonIndexed.length; i++) {
           const count = nonIndexed[i].attributes.position.count;
           finalGeo.addGroup(vertexOffset, count, i);
           vertexOffset += count;
         }
+
+        // IMPORTANT: The three-stdlib GLTFExporter only extracts per-group
+        // sub-ranges for INDEXED geometry.  For non-indexed geometry every
+        // primitive receives the full attribute buffers, which breaks
+        // multi-material mapping.  Adding a trivial identity index buffer
+        // [0, 1, 2, …, N-1] forces the exporter down its indexed code path
+        // so each group's start/count correctly selects only its vertices.
+        const totalVertices = finalGeo.attributes.position.count;
+        const indices = totalVertices > 65535
+          ? new Uint32Array(totalVertices)
+          : new Uint16Array(totalVertices);
+        for (let i = 0; i < totalVertices; i++) indices[i] = i;
+        finalGeo.setIndex(new THREE.BufferAttribute(indices, 1));
 
         finalMesh = new THREE.Mesh(finalGeo, materials);
 
