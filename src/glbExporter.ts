@@ -610,35 +610,82 @@ export function prepareSceneForExport(
 
       if (perMaterialGeos.length === 0) continue;
 
-      // ---- Build one mesh per material ----
-      // Using separate single-material meshes instead of one multi-material
-      // mesh avoids geometry-group / materialIndex mapping issues that cause
-      // textures to end up on the wrong surfaces after GLTF export.
-      // All meshes stay children of the exportGroup so they still appear
-      // as a single logical object in viewers.
+      // ---- Build a single merged mesh with correct material mapping ----
+      // We manually concatenate all per-material geometries into one
+      // non-indexed BufferGeometry and explicitly assign geometry groups.
+      // This avoids relying on mergeGeometries(…, true) which can
+      // mis-map materialIndex ↔ materials[] after attribute normalisation.
 
       // Clear all original children first
       while (exportGroup.children.length > 0) {
         exportGroup.children[0].removeFromParent();
       }
 
-      const baseName = exportGroup.name || 'Merged';
+      let finalMesh: THREE.Mesh;
 
-      for (let i = 0; i < perMaterialGeos.length; i++) {
-        const mesh = new THREE.Mesh(perMaterialGeos[i], materials[i]);
-        const matName =
-          materials[i].name ||
-          ((materials[i] as any).color
-            ? '#' + (materials[i] as any).color.getHexString()
-            : `mat${i}`);
-        mesh.name = `${baseName}_${matName}`;
-        exportGroup.add(mesh);
+      if (perMaterialGeos.length === 1) {
+        // Only one material – no groups needed
+        finalMesh = new THREE.Mesh(perMaterialGeos[0], materials[0]);
+      } else {
+        // Ensure attribute compatibility across per-material geometries
+        const compatFinal = ensureCompatibleAttributes(perMaterialGeos);
+
+        // Convert everything to non-indexed so vertex counts are simple
+        const nonIndexed = compatFinal.map((g) =>
+          g.index !== null ? g.toNonIndexed() : g,
+        );
+
+        // Collect attribute names from the first geometry (all share the
+        // same set after ensureCompatibleAttributes)
+        const attrNames = Object.keys(nonIndexed[0].attributes);
+
+        // Build the combined geometry by concatenating attribute arrays
+        const finalGeo = new THREE.BufferGeometry();
+
+        for (const name of attrNames) {
+          const itemSize = (
+            nonIndexed[0].attributes[name] as THREE.BufferAttribute
+          ).itemSize;
+          const totalLength = nonIndexed.reduce(
+            (sum, g) => sum + (g.attributes[name] as THREE.BufferAttribute).array.length,
+            0,
+          );
+          const merged = new Float32Array(totalLength);
+          let offset = 0;
+          for (const g of nonIndexed) {
+            const src = (g.attributes[name] as THREE.BufferAttribute).array;
+            merged.set(src, offset);
+            offset += src.length;
+          }
+          finalGeo.setAttribute(
+            name,
+            new THREE.BufferAttribute(merged, itemSize),
+          );
+        }
+
+        // Assign geometry groups – each maps a vertex range to a material
+        let vertexOffset = 0;
+        for (let i = 0; i < nonIndexed.length; i++) {
+          const count = nonIndexed[i].attributes.position.count;
+          finalGeo.addGroup(vertexOffset, count, i);
+          vertexOffset += count;
+        }
+
+        finalMesh = new THREE.Mesh(finalGeo, materials);
+
+        // Dispose temporaries
+        nonIndexed.forEach((g) => g.dispose());
       }
 
+      finalMesh.name = exportGroup.name
+        ? `${exportGroup.name}_merged`
+        : 'Merged';
+      exportGroup.add(finalMesh);
+
       console.log(
-        `[GLB Export] Merged ${allMeshes.length} meshes → ` +
-          `${perMaterialGeos.length} mesh(es) (one per material) ` +
-          `in "${exportGroup.name}"`,
+        `[GLB Export] Merged ${allMeshes.length} meshes → 1 mesh ` +
+          `(${materials.length} material(s)) in "${exportGroup.name}" → ` +
+          `"${finalMesh.name}"`,
       );
     }
   }
