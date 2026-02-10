@@ -610,46 +610,35 @@ export function prepareSceneForExport(
 
       if (perMaterialGeos.length === 0) continue;
 
-      // ---- Build final merged mesh ----
-      let finalMesh: THREE.Mesh;
+      // ---- Build one mesh per material ----
+      // Using separate single-material meshes instead of one multi-material
+      // mesh avoids geometry-group / materialIndex mapping issues that cause
+      // textures to end up on the wrong surfaces after GLTF export.
+      // All meshes stay children of the exportGroup so they still appear
+      // as a single logical object in viewers.
 
-      if (perMaterialGeos.length === 1) {
-        // Only one material – simple single-material mesh
-        finalMesh = new THREE.Mesh(perMaterialGeos[0], materials[0]);
-      } else {
-        // Multiple materials – merge with geometry groups (useGroups=true)
-        // so that group[i].materialIndex === i maps to materials[i].
-        const compatFinal = ensureCompatibleAttributes(perMaterialGeos);
-        const combinedGeo = BufferGeometryUtils.mergeGeometries(
-          compatFinal,
-          true,
-        );
-        if (!combinedGeo) {
-          console.warn(
-            `[GLB Export] Failed to combine per-material geometries in ` +
-              `"${exportGroup.name}" – skipping this exportGroup.`,
-          );
-          compatFinal.forEach((g) => g.dispose());
-          continue;
-        }
-        finalMesh = new THREE.Mesh(combinedGeo, materials);
-        compatFinal.forEach((g) => g.dispose());
-      }
-
-      finalMesh.name = exportGroup.name
-        ? `${exportGroup.name}_merged`
-        : 'Merged';
-
-      // Replace ALL children of the exportGroup with the single merged mesh
+      // Clear all original children first
       while (exportGroup.children.length > 0) {
         exportGroup.children[0].removeFromParent();
       }
-      exportGroup.add(finalMesh);
+
+      const baseName = exportGroup.name || 'Merged';
+
+      for (let i = 0; i < perMaterialGeos.length; i++) {
+        const mesh = new THREE.Mesh(perMaterialGeos[i], materials[i]);
+        const matName =
+          materials[i].name ||
+          ((materials[i] as any).color
+            ? '#' + (materials[i] as any).color.getHexString()
+            : `mat${i}`);
+        mesh.name = `${baseName}_${matName}`;
+        exportGroup.add(mesh);
+      }
 
       console.log(
-        `[GLB Export] Merged ${allMeshes.length} meshes ` +
-          `(${materials.length} material(s)) in "${exportGroup.name}" → ` +
-          `"${finalMesh.name}"`,
+        `[GLB Export] Merged ${allMeshes.length} meshes → ` +
+          `${perMaterialGeos.length} mesh(es) (one per material) ` +
+          `in "${exportGroup.name}"`,
       );
     }
   }
