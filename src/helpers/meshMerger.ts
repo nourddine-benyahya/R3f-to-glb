@@ -72,7 +72,7 @@ export function mergeExportGroups(clone: THREE.Scene): void {
       materialBuckets.get(key)!.geometries.push(geo);
     };
 
-    for (const mesh of allMeshes) {
+for (const mesh of allMeshes) {
       mesh.updateWorldMatrix(true, false);
 
       // Single combined matrix: exportGroup-local ← world ← mesh-local
@@ -84,15 +84,38 @@ export function mergeExportGroups(clone: THREE.Scene): void {
         ? mesh.material
         : [mesh.material];
 
-      if (mats.length <= 1 || mesh.geometry.groups.length === 0) {
-        // ---- Single-material mesh (common case) ----
-        const geo = mesh.geometry.clone();
+      // Helper to process a single geometry before adding to bucket
+      const processGeo = (mat: THREE.Material, geo: THREE.BufferGeometry) => {
+        // FIX: If material is flat shaded, we must split vertices to bake the look
+        // otherwise it will look smooth (puffy) in the exported GLB.
+        if ('flatShading' in mat && mat.flatShading === true) {
+            geo = geo.toNonIndexed(); 
+            geo.computeVertexNormals(); // Re-computes flat normals per face
+        }
+        
         geo.applyMatrix4(combinedMatrix);
         prepareGeometry(geo);
-        addToBucket(mats[0], geo);
+        addToBucket(mat, geo);
+      };
+
+      if (mats.length <= 1 || mesh.geometry.groups.length === 0) {
+        // ---- Single-material mesh ----
+        const geo = mesh.geometry.clone();
+        processGeo(mats[0], geo);
       } else {
-        // ---- Multi-material mesh → split geometry by its groups ----
-        splitMultiMaterialMesh(mesh, mats, combinedMatrix, addToBucket);
+        // ---- Multi-material mesh ----
+        // We need a custom addToBucket wrapper here to handle the splitting logic
+        // re-implemented slightly differently for the split function:
+        
+        splitMultiMaterialMesh(mesh, mats, combinedMatrix, (mat, geo) => {
+             if ('flatShading' in mat && mat.flatShading === true) {
+                geo = geo.toNonIndexed();
+                geo.computeVertexNormals();
+             }
+             // splitMultiMaterialMesh already applies matrix, so we just prepare
+             prepareGeometry(geo);
+             addToBucket(mat, geo);
+        });
       }
     }
 
