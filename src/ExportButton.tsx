@@ -26,9 +26,14 @@ export interface ExportButtonProps extends PrepareSceneOptions {
   /** Export options passed to GLTFExporter */
   options?: Omit<GLBExportOptions, 'filename'>;
   /**
+   * Optional scene object passed directly. When provided, the export
+   * uses this scene instead of the internal useThree() scene.
+   * Use this when you already have the scene from a context or ref.
+   */
+  scene?: THREE.Scene | null;
+  /**
    * Optional scene ref. When provided, the export reads from this ref
-   * instead of the internal useThree() scene. Use this to guarantee
-   * all dynamically-loaded objects are captured.
+   * instead of the internal useThree() scene.
    */
   sceneRef?: React.MutableRefObject<THREE.Scene | null>;
   /** Custom button styles */
@@ -53,6 +58,7 @@ export interface ExportButtonProps extends PrepareSceneOptions {
 export const ExportButton: React.FC<ExportButtonProps> = ({
   filename = 'scene',
   options = {},
+  scene: sceneProp,
   sceneRef,
   removeHelpers = true,
   removeCameras = true,
@@ -68,7 +74,7 @@ export const ExportButton: React.FC<ExportButtonProps> = ({
   showStats = true,
   position = 'top-right',
 }) => {
-  const { scene } = useThree();
+  const { scene: internalScene } = useThree();
   const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastExport, setLastExport] = useState<{ size: number; time: number } | null>(null);
@@ -98,8 +104,8 @@ export const ExportButton: React.FC<ExportButtonProps> = ({
       frameResolveRef.current = resolve;
     });
 
-    // Use the provided ref if available, otherwise fall back to useThree
-    const targetScene = sceneRef?.current ?? scene;
+    // Priority: scene prop > sceneRef > useThree internal scene
+    const targetScene = sceneProp ?? sceneRef?.current ?? internalScene;
 
     const startTime = performance.now();
 
@@ -140,7 +146,7 @@ export const ExportButton: React.FC<ExportButtonProps> = ({
       setIsExporting(false);
     }
   }, [
-    scene, sceneRef, filename, options,
+    internalScene, sceneProp, sceneRef, filename, options,
     removeHelpers, removeCameras, removeLights, removeCSGChildren,
     removeInvisibleMeshes, removeLineObjects, removeWireframeMeshes,
     assignReadableNames, mergeMeshesInGroups, isExporting, showStats,
