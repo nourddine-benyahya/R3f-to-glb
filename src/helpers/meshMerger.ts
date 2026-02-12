@@ -12,7 +12,9 @@ import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUti
  *   - Attribute normalisation: if geometries have different attribute
  *     sets (e.g. some lack UVs) missing attributes are zero-filled so
  *     mergeGeometries never fails silently.
- *   - Mixed indexed / non-indexed: all converted to non-indexed first.
+ *   - Mixed indexed / non-indexed: non-indexed geometries receive an
+ *     identity index so that indexed geometries keep their original
+ *     vertex-sharing structure (preserves split normals / sharp edges).
  *   - Multi-material source meshes: split by their geometry groups so
  *     each sub-geometry lands in the correct material bucket.
  *   - Identity index buffer: forces the three-stdlib GLTFExporter down
@@ -250,7 +252,10 @@ function extractNonIndexedSubGeometry(
  * so that BufferGeometryUtils.mergeGeometries() can merge them.
  *
  * 1. If there is a mix of indexed and non-indexed geometries, all
- *    indexed ones are expanded via toNonIndexed().
+ *    NON-indexed ones receive an identity index buffer.  This preserves
+ *    the vertex-sharing structure (split normals / sharp edges) of
+ *    originally-indexed geometries instead of destroying it via
+ *    toNonIndexed().
  * 2. For every attribute that exists on at least one geometry but
  *    is missing on another, a zero-filled attribute of the same
  *    itemSize is added.
@@ -276,9 +281,15 @@ function ensureCompatibleAttributes(
   for (let i = 0; i < geometries.length; i++) {
     let geo = geometries[i];
 
-    // Convert indexed → non-indexed when the set is mixed
-    if (hasIndexed && hasNonIndexed && geo.index !== null) {
-      geo = geo.toNonIndexed();
+    // Add an identity index to non-indexed geometries when the set is
+    // mixed, so that indexed geometries keep their split normals intact.
+    if (hasIndexed && hasNonIndexed && geo.index === null) {
+      geo = geo.clone();
+      const count = geo.attributes.position?.count ?? 0;
+      const identity =
+        count > 65535 ? new Uint32Array(count) : new Uint16Array(count);
+      for (let k = 0; k < count; k++) identity[k] = k;
+      geo.setIndex(new THREE.BufferAttribute(identity, 1));
     }
 
     const vertexCount = geo.attributes.position?.count ?? 0;
@@ -315,45 +326,66 @@ function ensureCompatibleAttributes(
  * Builds a single THREE.Mesh from per-material geometries.
  *
  * For multiple materials the geometries are concatenated into one
- * non-indexed BufferGeometry with explicit geometry groups, plus a
- * trivial identity index buffer to work around a three-stdlib
- * GLTFExporter limitation (it only extracts per-group sub-ranges
- * for indexed geometry).
+ * INDEXED BufferGeometry with explicit geometry groups.  Geometries
+ * are kept indexed to preserve vertex-sharing (split normals / sharp
+ * edges).  Non-indexed inputs receive an identity index buffer.
+ *
+ * The resulting mesh is always indexed, which also satisfies the
+ * three-stdlib GLTFExporter requirement of indexed geometry for
+ * correct per-group vertex range extraction.
  */
 function buildCombinedMesh(
   perMaterialGeos: THREE.BufferGeometry[],
   materials: THREE.Material[],
 ): THREE.Mesh {
   if (perMaterialGeos.length === 1) {
-    // Only one material – no groups needed
-    return new THREE.Mesh(perMaterialGeos[0], materials[0]);
+    const geo = perMaterialGeos[0];
+    // Need an index for the GLTFExporter even for single-material
+    if (geo.index === null) {
+      const count = geo.attributes.position.count;
+      const identity =
+        count > 65535 ? new Uint32Array(count) : new Uint16Array(count);
+      for (let i = 0; i < count; i++) identity[i] = i;
+      geo.setIndex(new THREE.BufferAttribute(identity, 1));
+    }
+    return new THREE.Mesh(geo, materials[0]);
   }
 
   // Ensure attribute compatibility across per-material geometries
   const compatFinal = ensureCompatibleAttributes(perMaterialGeos);
 
-  // Convert everything to non-indexed so vertex counts are simple
-  const nonIndexed = compatFinal.map((g) =>
-    g.index !== null ? g.toNonIndexed() : g,
-  );
+  // Ensure every geometry is indexed — add identity index to any that
+  // are non-indexed, so we never call toNonIndexed() and destroy
+  // split normals / sharp edge information.
+  const indexed = compatFinal.map((g) => {
+    if (g.index !== null) return g;
+    const count = g.attributes.position.count;
+    const identity =
+      count > 65535 ? new Uint32Array(count) : new Uint16Array(count);
+    for (let i = 0; i < count; i++) identity[i] = i;
+    const copy = g.clone();
+    copy.setIndex(new THREE.BufferAttribute(identity, 1));
+    return copy;
+  });
 
   // Collect attribute names (all share the same set after normalisation)
-  const attrNames = Object.keys(nonIndexed[0].attributes);
+  const attrNames = Object.keys(indexed[0].attributes);
+  const vertexCounts = indexed.map((g) => g.attributes.position.count);
 
   // Build the combined geometry by concatenating attribute arrays
   const finalGeo = new THREE.BufferGeometry();
 
   for (const name of attrNames) {
-    const itemSize = (nonIndexed[0].attributes[name] as THREE.BufferAttribute)
+    const itemSize = (indexed[0].attributes[name] as THREE.BufferAttribute)
       .itemSize;
-    const totalLength = nonIndexed.reduce(
+    const totalLength = indexed.reduce(
       (sum, g) =>
         sum + (g.attributes[name] as THREE.BufferAttribute).array.length,
       0,
     );
     const merged = new Float32Array(totalLength);
     let offset = 0;
-    for (const g of nonIndexed) {
+    for (const g of indexed) {
       const src = (g.attributes[name] as THREE.BufferAttribute).array;
       merged.set(src, offset);
       offset += src.length;
@@ -361,32 +393,30 @@ function buildCombinedMesh(
     finalGeo.setAttribute(name, new THREE.BufferAttribute(merged, itemSize));
   }
 
-  // Assign geometry groups – each maps an index range to a material
+  // Concatenate index arrays with vertex offsets
+  const totalIndices = indexed.reduce((sum, g) => sum + g.index!.count, 0);
+  const totalVertices = finalGeo.attributes.position.count;
+  const IndexArrayCtor =
+    totalVertices > 65535 ? Uint32Array : Uint16Array;
+  const mergedIndices = new IndexArrayCtor(totalIndices);
+
+  let indexOffset = 0;
   let vertexOffset = 0;
-  for (let i = 0; i < nonIndexed.length; i++) {
-    const count = nonIndexed[i].attributes.position.count;
-    finalGeo.addGroup(vertexOffset, count, i);
-    vertexOffset += count;
+  for (let i = 0; i < indexed.length; i++) {
+    const srcIndex = indexed[i].index!.array;
+    const indexCount = indexed[i].index!.count;
+    for (let j = 0; j < indexCount; j++) {
+      mergedIndices[indexOffset + j] = srcIndex[j] + vertexOffset;
+    }
+    // Group ranges are based on INDEX offsets (not vertex offsets)
+    finalGeo.addGroup(indexOffset, indexCount, i);
+    indexOffset += indexCount;
+    vertexOffset += vertexCounts[i];
   }
 
-  // IMPORTANT: The three-stdlib GLTFExporter only extracts per-group
-  // sub-ranges for INDEXED geometry.  For non-indexed geometry every
-  // primitive receives the full attribute buffers, which breaks
-  // multi-material mapping.  Adding a trivial identity index buffer
-  // [0, 1, 2, …, N-1] forces the exporter down its indexed code path
-  // so each group's start/count correctly selects only its vertices.
-  const totalVertices = finalGeo.attributes.position.count;
-  const indices =
-    totalVertices > 65535
-      ? new Uint32Array(totalVertices)
-      : new Uint16Array(totalVertices);
-  for (let i = 0; i < totalVertices; i++) indices[i] = i;
-  finalGeo.setIndex(new THREE.BufferAttribute(indices, 1));
+  finalGeo.setIndex(new THREE.BufferAttribute(mergedIndices, 1));
 
   const mesh = new THREE.Mesh(finalGeo, materials);
-
-  // Dispose temporaries
-  nonIndexed.forEach((g) => g.dispose());
 
   return mesh;
 }
