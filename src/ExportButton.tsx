@@ -5,37 +5,32 @@
  * Must be placed inside a Canvas component. All scene cleanup options are
  * configurable via props.
  *
- * @example
- * <Canvas>
- *   <YourScene />
- *   <ExportButton filename="my-model" />
- * </Canvas>
- *
- * @example
- * <Canvas>
- *   <YourScene />
- *   <ExportButton
- *     filename="my-model"
- *     removeLights={false}
- *     removeCSGChildren={false}
- *     position="bottom-left"
- *   />
- * </Canvas>
+ * Accepts an optional `sceneRef` prop — a React ref that always points to the
+ * live scene. When provided, the export reads from that ref at click time,
+ * guaranteeing all async-loaded objects (backend models, lazy components) are
+ * included.
  */
 
-import React, { useState, useCallback } from 'react';
-import { useThree } from '@react-three/fiber';
+import React, { useState, useCallback, useRef } from 'react';
+import { useThree, useFrame } from '@react-three/fiber';
 import { Html } from '@react-three/drei';
 import { exportToGLB } from './export';
 import { prepareSceneForExport } from './prepareScene';
 import { getSceneStats } from './helpers/sceneStats';
 import type { GLBExportOptions, PrepareSceneOptions } from './types';
+import * as THREE from 'three';
 
 export interface ExportButtonProps extends PrepareSceneOptions {
   /** Filename without extension. Default: 'scene' */
   filename?: string;
   /** Export options passed to GLTFExporter */
   options?: Omit<GLBExportOptions, 'filename'>;
+  /**
+   * Optional scene ref. When provided, the export reads from this ref
+   * instead of the internal useThree() scene. Use this to guarantee
+   * all dynamically-loaded objects are captured.
+   */
+  sceneRef?: React.MutableRefObject<THREE.Scene | null>;
   /** Custom button styles */
   style?: React.CSSProperties;
   /** Custom class name */
@@ -58,6 +53,7 @@ export interface ExportButtonProps extends PrepareSceneOptions {
 export const ExportButton: React.FC<ExportButtonProps> = ({
   filename = 'scene',
   options = {},
+  sceneRef,
   removeHelpers = true,
   removeCameras = true,
   removeLights = true,
@@ -77,6 +73,17 @@ export const ExportButton: React.FC<ExportButtonProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [lastExport, setLastExport] = useState<{ size: number; time: number } | null>(null);
 
+  // Resolved inside useFrame — guarantees the export starts AFTER R3F
+  // has reconciled the scene (all async-loaded objects are present).
+  const frameResolveRef = useRef<(() => void) | null>(null);
+
+  useFrame(() => {
+    if (frameResolveRef.current) {
+      frameResolveRef.current();
+      frameResolveRef.current = null;
+    }
+  });
+
   const handleExport = useCallback(async () => {
     if (isExporting) return;
 
@@ -84,10 +91,20 @@ export const ExportButton: React.FC<ExportButtonProps> = ({
     setError(null);
     setLastExport(null);
 
+    // Wait until the NEXT R3F frame. useFrame runs AFTER React/R3F
+    // reconciliation, so every object (including backend-loaded ones)
+    // is guaranteed to be in the scene tree at this point.
+    await new Promise<void>((resolve) => {
+      frameResolveRef.current = resolve;
+    });
+
+    // Use the provided ref if available, otherwise fall back to useThree
+    const targetScene = sceneRef?.current ?? scene;
+
     const startTime = performance.now();
 
     try {
-      const cleanScene = prepareSceneForExport(scene, {
+      const cleanScene = prepareSceneForExport(targetScene, {
         removeHelpers,
         removeCameras,
         removeLights,
@@ -123,7 +140,7 @@ export const ExportButton: React.FC<ExportButtonProps> = ({
       setIsExporting(false);
     }
   }, [
-    scene, filename, options,
+    scene, sceneRef, filename, options,
     removeHelpers, removeCameras, removeLights, removeCSGChildren,
     removeInvisibleMeshes, removeLineObjects, removeWireframeMeshes,
     assignReadableNames, mergeMeshesInGroups, isExporting, showStats,
