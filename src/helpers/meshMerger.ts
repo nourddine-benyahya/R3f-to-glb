@@ -144,22 +144,38 @@ for (const mesh of allMeshes) {
 
     if (perMaterialGeos.length === 0) continue;
 
-    // ---- Build the final single merged mesh ----
-    const finalMesh = buildCombinedMesh(perMaterialGeos, materials);
-    finalMesh.name = exportGroup.name
-      ? `${exportGroup.name}_merged`
-      : 'Merged';
-
-    // Replace ALL children of the exportGroup with the merged mesh
+    // Replace ALL children of the exportGroup with per-material meshes.
+    // Each mesh is single-material — this avoids the GLTF multi-primitive
+    // shared-accessor path which can cause shading artefacts in some
+    // viewers when geometry groups share a vertex buffer.
     while (exportGroup.children.length > 0) {
       exportGroup.children[0].removeFromParent();
     }
-    exportGroup.add(finalMesh);
+
+    for (let i = 0; i < perMaterialGeos.length; i++) {
+      const geo = perMaterialGeos[i];
+
+      // Ensure indexed for GLTFExporter
+      if (geo.index === null) {
+        const count = geo.attributes.position.count;
+        const identity =
+          count > 65535 ? new Uint32Array(count) : new Uint16Array(count);
+        for (let k = 0; k < count; k++) identity[k] = k;
+        geo.setIndex(new THREE.BufferAttribute(identity, 1));
+      }
+
+      const mesh = new THREE.Mesh(geo, materials[i]);
+      const matLabel = materials[i].name || `mat${i}`;
+      mesh.name = exportGroup.name
+        ? `${exportGroup.name}_${matLabel}`
+        : `Merged_${matLabel}`;
+      exportGroup.add(mesh);
+    }
 
     console.log(
-      `[GLB Export] Merged ${allMeshes.length} meshes → 1 mesh ` +
-        `(${materials.length} material(s)) in "${exportGroup.name}" → ` +
-        `"${finalMesh.name}"`,
+      `[GLB Export] Merged ${allMeshes.length} meshes → ` +
+        `${perMaterialGeos.length} mesh(es) ` +
+        `(1 per material) in "${exportGroup.name}"`,
     );
   }
 }
@@ -398,109 +414,4 @@ function concatIndexedGeometries(
 
   result.setIndex(new THREE.BufferAttribute(mergedIndices, 1));
   return result;
-}
-
-/**
- * Builds a single THREE.Mesh from per-material geometries.
- *
- * Concatenates all per-material geometries into one indexed
- * BufferGeometry with explicit geometry groups.  Vertex-sharing
- * (split normals / sharp edges) is preserved throughout.
- *
- * The resulting mesh is always indexed, which satisfies the
- * three-stdlib GLTFExporter requirement for correct per-group
- * vertex range extraction.
- */
-function buildCombinedMesh(
-  perMaterialGeos: THREE.BufferGeometry[],
-  materials: THREE.Material[],
-): THREE.Mesh {
-  if (perMaterialGeos.length === 1) {
-    const geo = perMaterialGeos[0];
-    // Ensure indexed for GLTFExporter even with single material
-    if (geo.index === null) {
-      const count = geo.attributes.position.count;
-      const identity =
-        count > 65535 ? new Uint32Array(count) : new Uint16Array(count);
-      for (let i = 0; i < count; i++) identity[i] = i;
-      geo.setIndex(new THREE.BufferAttribute(identity, 1));
-    }
-    return new THREE.Mesh(geo, materials[0]);
-  }
-
-  // Ensure attribute compatibility across per-material geometries
-  ensureCompatibleAttributes(perMaterialGeos);
-
-  const attrNames = Object.keys(perMaterialGeos[0].attributes);
-  const vertexCounts = perMaterialGeos.map(
-    (g) => g.attributes.position.count,
-  );
-
-  // Build the combined geometry by concatenating attribute arrays
-  const finalGeo = new THREE.BufferGeometry();
-
-  for (const name of attrNames) {
-    const itemSize = (
-      perMaterialGeos[0].attributes[name] as THREE.BufferAttribute
-    ).itemSize;
-    const totalLength = perMaterialGeos.reduce(
-      (sum, g) =>
-        sum + (g.attributes[name] as THREE.BufferAttribute).array.length,
-      0,
-    );
-    const merged = new Float32Array(totalLength);
-    let offset = 0;
-    for (const g of perMaterialGeos) {
-      const src = (g.attributes[name] as THREE.BufferAttribute).array;
-      merged.set(src, offset);
-      offset += src.length;
-    }
-    finalGeo.setAttribute(name, new THREE.BufferAttribute(merged, itemSize));
-  }
-
-  // Concatenate index arrays with vertex offsets and assign groups
-  const totalIndices = perMaterialGeos.reduce(
-    (sum, g) => sum + g.index!.count,
-    0,
-  );
-  const totalVertices = finalGeo.attributes.position.count;
-  const IndexCtor = totalVertices > 65535 ? Uint32Array : Uint16Array;
-  const mergedIndices = new IndexCtor(totalIndices);
-
-  let indexOffset = 0;
-  let vertexOffset = 0;
-  for (let i = 0; i < perMaterialGeos.length; i++) {
-    const srcIndex = perMaterialGeos[i].index!.array;
-    const indexCount = perMaterialGeos[i].index!.count;
-    for (let j = 0; j < indexCount; j++) {
-      mergedIndices[indexOffset + j] = srcIndex[j] + vertexOffset;
-    }
-    // Group ranges are based on INDEX offsets
-    finalGeo.addGroup(indexOffset, indexCount, i);
-    indexOffset += indexCount;
-    vertexOffset += vertexCounts[i];
-  }
-
-  finalGeo.setIndex(new THREE.BufferAttribute(mergedIndices, 1));
-
-  // Safety: renormalize all normals to ensure unit length
-  const normalAttr = finalGeo.attributes.normal as
-    | THREE.BufferAttribute
-    | undefined;
-  if (normalAttr) {
-    const arr = normalAttr.array as Float32Array;
-    for (let i = 0; i < arr.length; i += 3) {
-      const x = arr[i],
-        y = arr[i + 1],
-        z = arr[i + 2];
-      const len = Math.sqrt(x * x + y * y + z * z);
-      if (len > 1e-8) {
-        arr[i] /= len;
-        arr[i + 1] /= len;
-        arr[i + 2] /= len;
-      }
-    }
-  }
-
-  return new THREE.Mesh(finalGeo, materials);
 }
