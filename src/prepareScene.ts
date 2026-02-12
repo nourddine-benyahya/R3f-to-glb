@@ -14,6 +14,65 @@ function countMeshes(root: THREE.Object3D): number {
   return count;
 }
 
+const isInvalid = (v: number) => isNaN(v) || !isFinite(v);
+
+/**
+ * Sanitize values that would break the GLTFExporter:
+ *  1. NaN / Infinity in position, rotation, scale
+ *  2. MeshPhysicalMaterial.ior < 1.0 (glTF requires >= 1.0)
+ *  3. Custom attributes (prefixed with _) whose count doesn't match position
+ */
+function sanitizeForExport(root: THREE.Object3D): void {
+  root.traverse((object) => {
+    // 1. Fix NaN / Infinity transforms
+    if (isInvalid(object.position.x)) object.position.x = 0;
+    if (isInvalid(object.position.y)) object.position.y = 0;
+    if (isInvalid(object.position.z)) object.position.z = 0;
+
+    if (isInvalid(object.rotation.x)) object.rotation.x = 0;
+    if (isInvalid(object.rotation.y)) object.rotation.y = 0;
+    if (isInvalid(object.rotation.z)) object.rotation.z = 0;
+
+    if (isInvalid(object.scale.x)) object.scale.x = 1;
+    if (isInvalid(object.scale.y)) object.scale.y = 1;
+    if (isInvalid(object.scale.z)) object.scale.z = 1;
+
+    object.updateMatrix();
+
+    if (object instanceof THREE.Mesh) {
+      // 2. Fix IOR < 1.0 on MeshPhysicalMaterial
+      const materials = Array.isArray(object.material)
+        ? object.material
+        : [object.material];
+      for (const mat of materials) {
+        if (
+          mat &&
+          'ior' in mat &&
+          typeof (mat as any).ior === 'number' &&
+          (mat as any).ior < 1.0
+        ) {
+          (mat as any).ior = 1.0;
+        }
+      }
+
+      // 3. Remove custom attributes with mismatched vertex counts
+      const geo = object.geometry;
+      if (geo && geo.attributes && geo.attributes.position) {
+        const expectedCount = geo.attributes.position.count;
+        for (const key of Object.keys(geo.attributes)) {
+          if (key.startsWith('_') && geo.attributes[key].count !== expectedCount) {
+            console.warn(
+              `[GLB Export] Removing attribute "${key}" from mesh "${object.name || object.uuid}" ` +
+                `(count ${geo.attributes[key].count} vs position ${expectedCount})`,
+            );
+            geo.deleteAttribute(key);
+          }
+        }
+      }
+    }
+  });
+}
+
 /**
  * Clones and cleans a scene for export by removing non-exportable elements.
  */
@@ -47,6 +106,9 @@ export function prepareSceneForExport(
       `[GLB Export] WARNING: scene.clone(true) lost ${originalCount - cloneCount} mesh(es)!`,
     );
   }
+
+  // 0. Sanitize values that would break the GLTFExporter
+  sanitizeForExport(clone);
 
   console.log('[GLB Export] Scene structure BEFORE cleanup:');
   logSceneHierarchy(clone, 0, 3);
