@@ -5,18 +5,17 @@ import { assignReadableNames } from './helpers/namingUtils';
 import { mergeExportGroups } from './helpers/meshMerger';
 import { logSceneHierarchy } from './helpers/debug';
 
+/** Count all meshes in a scene tree */
+function countMeshes(root: THREE.Object3D): number {
+  let count = 0;
+  root.traverse((child) => {
+    if (child instanceof THREE.Mesh) count++;
+  });
+  return count;
+}
+
 /**
  * Clones and cleans a scene for export by removing non-exportable elements.
- *
- * @example
- * const cleanScene = prepareSceneForExport(scene);
- * await exportToGLB(cleanScene);
- *
- * @example
- * const cleanScene = prepareSceneForExport(scene, {
- *   removeLights: false,        // keep lights in export
- *   assignReadableNames: false,  // keep original names
- * });
  */
 export function prepareSceneForExport(
   scene: THREE.Scene,
@@ -34,7 +33,20 @@ export function prepareSceneForExport(
     mergeMeshesInGroups = true,
   } = options;
 
+  // --- Diagnostic: count meshes in original scene ---
+  const originalCount = countMeshes(scene);
+  console.log(`[GLB Export] Original scene: ${originalCount} mesh(es)`);
+
   const clone = scene.clone(true);
+
+  // --- Diagnostic: count meshes after clone ---
+  const cloneCount = countMeshes(clone);
+  console.log(`[GLB Export] After clone: ${cloneCount} mesh(es)`);
+  if (cloneCount < originalCount) {
+    console.warn(
+      `[GLB Export] WARNING: scene.clone(true) lost ${originalCount - cloneCount} mesh(es)!`,
+    );
+  }
 
   console.log('[GLB Export] Scene structure BEFORE cleanup:');
   logSceneHierarchy(clone, 0, 3);
@@ -48,11 +60,15 @@ export function prepareSceneForExport(
     removeLineObjects,
     removeWireframeMeshes,
   });
+  const afterCleanup = countMeshes(clone);
+  console.log(`[GLB Export] After removeUnwantedObjects: ${afterCleanup} mesh(es)`);
 
   // 2. Strip CSG internal children
   if (shouldRemoveCSG) {
     removeCSGChildren(clone);
   }
+  const afterCSG = countMeshes(clone);
+  console.log(`[GLB Export] After removeCSGChildren: ${afterCSG} mesh(es)`);
 
   // 3. Auto-name unnamed objects
   if (shouldAssignNames) {
@@ -63,6 +79,8 @@ export function prepareSceneForExport(
   if (mergeMeshesInGroups) {
     mergeExportGroups(clone);
   }
+  const afterMerge = countMeshes(clone);
+  console.log(`[GLB Export] After merge: ${afterMerge} mesh(es)`);
 
   console.log('[GLB Export] Scene structure AFTER cleanup:');
   logSceneHierarchy(clone, 0, 3);
