@@ -1,21 +1,23 @@
 import * as THREE from 'three';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 /**
- * Merges descendant meshes of groups named "exportGroup" that share materials.
+ * Merges all descendant meshes of groups named "exportGroup" into a
+ * single multi-material mesh per group.
  *
  * Only groups explicitly tagged with name="exportGroup" are processed;
  * everything else is left as-is.
  *
- * Strategy per material bucket:
- *   - Unique-material mesh (only one mesh uses this material): the mesh is
- *     left COMPLETELY UNTOUCHED in the hierarchy — same geometry, same
- *     transforms, same parent chain. No clone, no reparent, no modification.
- *     This preserves the original normals / split-normals / shading exactly.
- *   - Shared-material meshes (2+ meshes use the same material): geometries
- *     are cloned, transformed into the exportGroup's local space, and
- *     concatenated into one geometry.
- *   - Multi-material source meshes are always split by material and their
- *     sub-geometries are merged into the appropriate material buckets.
+ * Key capabilities:
+ *   - Attribute normalisation: if geometries have different attribute
+ *     sets (e.g. some lack UVs) missing attributes are zero-filled so
+ *     mergeGeometries never fails silently.
+ *   - Mixed indexed / non-indexed: all converted to non-indexed first.
+ *   - Multi-material source meshes: split by their geometry groups so
+ *     each sub-geometry lands in the correct material bucket.
+ *   - Identity index buffer: forces the three-stdlib GLTFExporter down
+ *     its indexed code path so each geometry group's vertex range is
+ *     correctly extracted per primitive.
  */
 export function mergeExportGroups(clone: THREE.Scene): void {
   // --- Locate every group tagged name="exportGroup" ---
@@ -50,183 +52,92 @@ export function mergeExportGroups(clone: THREE.Scene): void {
 
     if (allMeshes.length === 0) continue;
 
+    // Inverse world matrix of the exportGroup – used to convert every
+    // mesh's geometry from world space into the exportGroup's local space.
     exportGroup.updateWorldMatrix(true, true);
     const groupWorldMatrixInverse = exportGroup.matrixWorld.clone().invert();
 
-    // ---- Phase 1: collect bucket entries ----
-    interface BucketEntry {
-      /** Original mesh ref — set for single-material source meshes */
-      originalMesh?: THREE.Mesh;
-      /** The mesh→exportGroup transform */
-      combinedMatrix: THREE.Matrix4;
-      /** Already-extracted sub-geometry (multi-material splits) */
-      extractedGeo?: THREE.BufferGeometry;
-    }
-
+    // ---- Build per-material geometry buckets ----
     const materialBuckets = new Map<
       string,
-      { material: THREE.Material; entries: BucketEntry[] }
+      { material: THREE.Material; geometries: THREE.BufferGeometry[] }
     >();
 
-    // Track multi-material source meshes (always need removal + rebuild)
-    const multiMaterialSources = new Set<THREE.Mesh>();
-
-    const addEntry = (
-      mat: THREE.Material,
-      entry: BucketEntry,
-    ) => {
+    const addToBucket = (mat: THREE.Material, geo: THREE.BufferGeometry) => {
       const key = mat.uuid;
       if (!materialBuckets.has(key)) {
-        materialBuckets.set(key, { material: mat, entries: [] });
+        materialBuckets.set(key, { material: mat, geometries: [] });
       }
-      materialBuckets.get(key)!.entries.push(entry);
+      materialBuckets.get(key)!.geometries.push(geo);
     };
 
     for (const mesh of allMeshes) {
       mesh.updateWorldMatrix(true, false);
-
-      const combinedMatrix = new THREE.Matrix4()
-        .copy(groupWorldMatrixInverse)
-        .multiply(mesh.matrixWorld);
-
       const mats = Array.isArray(mesh.material)
         ? mesh.material
         : [mesh.material];
 
       if (mats.length <= 1 || mesh.geometry.groups.length === 0) {
-        // Single-material mesh — store reference, DON'T clone/transform yet
-        addEntry(mats[0], { originalMesh: mesh, combinedMatrix });
+        // ---- Single-material mesh (common case) ----
+        const geo = mesh.geometry.clone();
+        geo.applyMatrix4(mesh.matrixWorld);
+        geo.applyMatrix4(groupWorldMatrixInverse);
+        addToBucket(mats[0], geo);
       } else {
-        // Multi-material mesh — must extract sub-geometries per material
-        multiMaterialSources.add(mesh);
-        const isIndexed = mesh.geometry.index !== null;
-        for (const grp of mesh.geometry.groups) {
-          const matIdx = grp.materialIndex ?? 0;
-          const mat = mats[matIdx] ?? mats[0];
-          const subGeo = isIndexed
-            ? extractIndexedSubGeometry(mesh.geometry, grp)
-            : extractNonIndexedSubGeometry(mesh.geometry, grp);
-          addEntry(mat, { extractedGeo: subGeo, combinedMatrix });
-        }
+        // ---- Multi-material mesh → split geometry by its groups ----
+        splitMultiMaterialMesh(
+          mesh,
+          mats,
+          groupWorldMatrixInverse,
+          addToBucket,
+        );
       }
     }
 
-    // ---- Phase 2: process each material bucket ----
-    // Multi-material sources always need removal (they get split by material)
-    const meshesToRemove = new Set<THREE.Mesh>(multiMaterialSources);
-    const newMeshes: THREE.Mesh[] = [];
-    let keptCount = 0;
+    // ---- Merge geometries inside each material bucket ----
+    const perMaterialGeos: THREE.BufferGeometry[] = [];
+    const materials: THREE.Material[] = [];
 
-    for (const [, { material, entries }] of materialBuckets) {
-      // ---- Skip path: unique-material mesh ----
-      // If this bucket has exactly ONE entry from a single-material source,
-      // leave it COMPLETELY UNTOUCHED in the hierarchy. No clone, no reparent,
-      // no geometry modification of any kind. The GLTFExporter will find it
-      // in its original position with its original transforms and geometry.
-      if (
-        entries.length === 1 &&
-        entries[0].originalMesh &&
-        !entries[0].extractedGeo
-      ) {
-        keptCount++;
-        continue;
-      }
+    for (const [, { material, geometries }] of materialBuckets) {
+      const compatible = ensureCompatibleAttributes(geometries);
 
-      // ---- Merge path: shared material or multi-material sub-geometry ----
-      // Mark single-material source meshes for removal
-      for (const entry of entries) {
-        if (entry.originalMesh) {
-          meshesToRemove.add(entry.originalMesh);
-        }
-      }
-
-      const geos: THREE.BufferGeometry[] = [];
-
-      for (const entry of entries) {
-        let geo: THREE.BufferGeometry;
-
-        if (entry.extractedGeo) {
-          // Sub-geometry from a multi-material split
-          geo = entry.extractedGeo;
-        } else if (entry.originalMesh) {
-          // Single-material mesh that shares a material with others
-          geo = entry.originalMesh.geometry.clone();
-        } else {
-          continue;
-        }
-
-        geo.applyMatrix4(entry.combinedMatrix);
-        prepareGeometry(geo);
-        geos.push(geo);
-      }
-
-      if (geos.length === 0) continue;
-
-      const compatible = ensureCompatibleAttributes(geos);
       const merged =
         compatible.length === 1
           ? compatible[0]
-          : concatIndexedGeometries(compatible);
+          : BufferGeometryUtils.mergeGeometries(compatible, false);
 
-      if (!merged) {
+      if (merged) {
+        perMaterialGeos.push(merged);
+        materials.push(material);
+      } else {
         console.warn(
-          `[GLB Export] Failed to merge geometries for material ` +
-            `"${material.name || material.uuid}" – skipping.`,
+          `[GLB Export] Failed to merge ${geometries.length} geometries ` +
+            `for material "${material.name || material.uuid}" – skipping.`,
         );
-        continue;
       }
 
-      // Ensure indexed for GLTFExporter
-      if (merged.index === null) {
-        const count = merged.attributes.position.count;
-        const identity =
-          count > 65535 ? new Uint32Array(count) : new Uint16Array(count);
-        for (let k = 0; k < count; k++) identity[k] = k;
-        merged.setIndex(new THREE.BufferAttribute(identity, 1));
-      }
-
-      const matLabel = material.name || `mat${newMeshes.length}`;
-      const outMesh = new THREE.Mesh(merged, material);
-      outMesh.name = exportGroup.name
-        ? `${exportGroup.name}_${matLabel}`
-        : `Merged_${matLabel}`;
-      newMeshes.push(outMesh);
+      // Dispose intermediate clones (skip single-geo case – it IS the result)
+      if (compatible.length > 1) compatible.forEach((g) => g.dispose());
     }
 
-    // ---- Phase 3: apply changes to the scene tree ----
-    // Only remove meshes that were merged or split — leave the rest untouched
-    for (const mesh of meshesToRemove) {
-      mesh.removeFromParent();
-    }
+    if (perMaterialGeos.length === 0) continue;
 
-    // Add newly created merged meshes as direct children of exportGroup
-    for (const mesh of newMeshes) {
-      exportGroup.add(mesh);
-    }
+    // ---- Build the final single merged mesh ----
+    const finalMesh = buildCombinedMesh(perMaterialGeos, materials);
+    finalMesh.name = exportGroup.name
+      ? `${exportGroup.name}_merged`
+      : 'Merged';
 
-    // Clean up empty intermediate groups (bottom-up)
-    let changed = true;
-    while (changed) {
-      changed = false;
-      const empties: THREE.Object3D[] = [];
-      exportGroup.traverse((child) => {
-        if (
-          child !== exportGroup &&
-          !(child instanceof THREE.Mesh) &&
-          child.children.length === 0
-        ) {
-          empties.push(child);
-        }
-      });
-      for (const g of empties) {
-        g.removeFromParent();
-        changed = true;
-      }
+    // Replace ALL children of the exportGroup with the merged mesh
+    while (exportGroup.children.length > 0) {
+      exportGroup.children[0].removeFromParent();
     }
+    exportGroup.add(finalMesh);
 
     console.log(
-      `[GLB Export] "${exportGroup.name}": kept ${keptCount} mesh(es) untouched, ` +
-        `merged ${meshesToRemove.size} source mesh(es) → ${newMeshes.length} output mesh(es)`,
+      `[GLB Export] Merged ${allMeshes.length} meshes → 1 mesh ` +
+        `(${materials.length} material(s)) in "${exportGroup.name}" → ` +
+        `"${finalMesh.name}"`,
     );
   }
 }
@@ -236,27 +147,37 @@ export function mergeExportGroups(clone: THREE.Scene): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Prepares a geometry for merging (used only for the multi-mesh path):
- * - Computes vertex normals if none exist
- * - Ensures the geometry is indexed
- * - Clears stale geometry groups
+ * Splits a multi-material mesh into separate geometries per material
+ * and adds each to the appropriate material bucket.
  */
-function prepareGeometry(geo: THREE.BufferGeometry): void {
-  if (!geo.attributes.normal) {
-    geo.computeVertexNormals();
+function splitMultiMaterialMesh(
+  mesh: THREE.Mesh,
+  mats: THREE.Material[],
+  groupWorldMatrixInverse: THREE.Matrix4,
+  addToBucket: (mat: THREE.Material, geo: THREE.BufferGeometry) => void,
+): void {
+  const isIndexed = mesh.geometry.index !== null;
+
+  for (const grp of mesh.geometry.groups) {
+    const matIdx = grp.materialIndex ?? 0;
+    const mat = mats[matIdx] ?? mats[0];
+    let subGeo: THREE.BufferGeometry;
+
+    if (isIndexed) {
+      subGeo = extractIndexedSubGeometry(mesh.geometry, grp);
+    } else {
+      subGeo = extractNonIndexedSubGeometry(mesh.geometry, grp);
+    }
+
+    subGeo.applyMatrix4(mesh.matrixWorld);
+    subGeo.applyMatrix4(groupWorldMatrixInverse);
+    addToBucket(mat, subGeo);
   }
-  if (geo.index === null) {
-    const count = geo.attributes.position.count;
-    const identity =
-      count > 65535 ? new Uint32Array(count) : new Uint16Array(count);
-    for (let i = 0; i < count; i++) identity[i] = i;
-    geo.setIndex(new THREE.BufferAttribute(identity, 1));
-  }
-  geo.clearGroups();
 }
 
 /**
  * Extracts a sub-geometry from an indexed geometry for a given group.
+ * Only copies the vertices actually referenced by the group's index range.
  */
 function extractIndexedSubGeometry(
   sourceGeo: THREE.BufferGeometry,
@@ -265,17 +186,20 @@ function extractIndexedSubGeometry(
   const subGeo = new THREE.BufferGeometry();
   const srcIndex = sourceGeo.index!.array;
 
+  // Collect unique vertex indices used by this group
   const usedVertices = new Set<number>();
   for (let i = grp.start; i < grp.start + grp.count; i++) {
     usedVertices.add(srcIndex[i]);
   }
 
+  // Map old vertex index → compacted new index
   const vertexRemap = new Map<number, number>();
   let nextIdx = 0;
   for (const v of usedVertices) {
     vertexRemap.set(v, nextIdx++);
   }
 
+  // Copy attributes for used vertices only
   for (const [attrName, attr] of Object.entries(sourceGeo.attributes)) {
     const src = attr as THREE.BufferAttribute;
     const itemSize = src.itemSize;
@@ -288,6 +212,7 @@ function extractIndexedSubGeometry(
     subGeo.setAttribute(attrName, new THREE.BufferAttribute(newArr, itemSize));
   }
 
+  // Build new index buffer
   const newIndices: number[] = [];
   for (let i = grp.start; i < grp.start + grp.count; i++) {
     newIndices.push(vertexRemap.get(srcIndex[i])!);
@@ -299,6 +224,7 @@ function extractIndexedSubGeometry(
 
 /**
  * Extracts a sub-geometry from a non-indexed geometry for a given group.
+ * Slices the attribute arrays based on group start/count.
  */
 function extractNonIndexedSubGeometry(
   sourceGeo: THREE.BufferGeometry,
@@ -320,23 +246,47 @@ function extractNonIndexedSubGeometry(
 }
 
 /**
- * Ensures all geometries have the same set of attributes.
- * Missing attributes are zero-filled.
+ * Ensures all geometries have the same set of attributes and index status
+ * so that BufferGeometryUtils.mergeGeometries() can merge them.
+ *
+ * 1. If there is a mix of indexed and non-indexed geometries, all
+ *    indexed ones are expanded via toNonIndexed().
+ * 2. For every attribute that exists on at least one geometry but
+ *    is missing on another, a zero-filled attribute of the same
+ *    itemSize is added.
  */
 function ensureCompatibleAttributes(
   geometries: THREE.BufferGeometry[],
 ): THREE.BufferGeometry[] {
   if (geometries.length <= 1) return geometries;
 
+  // Collect union of all attribute names + index status
   const allAttrNames = new Set<string>();
-  for (const geo of geometries) {
-    Object.keys(geo.attributes).forEach((n) => allAttrNames.add(n));
-  }
+  let hasIndexed = false;
+  let hasNonIndexed = false;
 
   for (const geo of geometries) {
+    Object.keys(geo.attributes).forEach((n) => allAttrNames.add(n));
+    if (geo.index !== null) hasIndexed = true;
+    else hasNonIndexed = true;
+  }
+
+  const result: THREE.BufferGeometry[] = [];
+
+  for (let i = 0; i < geometries.length; i++) {
+    let geo = geometries[i];
+
+    // Convert indexed → non-indexed when the set is mixed
+    if (hasIndexed && hasNonIndexed && geo.index !== null) {
+      geo = geo.toNonIndexed();
+    }
+
     const vertexCount = geo.attributes.position?.count ?? 0;
+
+    // Add any missing attributes with zero-filled defaults
     for (const attrName of allAttrNames) {
       if (!geo.attributes[attrName]) {
+        // Match itemSize from a geometry that has this attribute
         let itemSize = 3;
         for (const other of geometries) {
           const otherAttr = other.attributes[attrName] as
@@ -354,59 +304,89 @@ function ensureCompatibleAttributes(
         );
       }
     }
+
+    result.push(geo);
   }
-  return geometries;
+
+  return result;
 }
 
 /**
- * Concatenates multiple indexed geometries into one indexed geometry.
+ * Builds a single THREE.Mesh from per-material geometries.
+ *
+ * For multiple materials the geometries are concatenated into one
+ * non-indexed BufferGeometry with explicit geometry groups, plus a
+ * trivial identity index buffer to work around a three-stdlib
+ * GLTFExporter limitation (it only extracts per-group sub-ranges
+ * for indexed geometry).
  */
-function concatIndexedGeometries(
-  geometries: THREE.BufferGeometry[],
-): THREE.BufferGeometry {
-  const attrNames = Object.keys(geometries[0].attributes);
-  const vertexCounts = geometries.map((g) => g.attributes.position.count);
+function buildCombinedMesh(
+  perMaterialGeos: THREE.BufferGeometry[],
+  materials: THREE.Material[],
+): THREE.Mesh {
+  if (perMaterialGeos.length === 1) {
+    // Only one material – no groups needed
+    return new THREE.Mesh(perMaterialGeos[0], materials[0]);
+  }
 
-  const result = new THREE.BufferGeometry();
+  // Ensure attribute compatibility across per-material geometries
+  const compatFinal = ensureCompatibleAttributes(perMaterialGeos);
+
+  // Convert everything to non-indexed so vertex counts are simple
+  const nonIndexed = compatFinal.map((g) =>
+    g.index !== null ? g.toNonIndexed() : g,
+  );
+
+  // Collect attribute names (all share the same set after normalisation)
+  const attrNames = Object.keys(nonIndexed[0].attributes);
+
+  // Build the combined geometry by concatenating attribute arrays
+  const finalGeo = new THREE.BufferGeometry();
 
   for (const name of attrNames) {
-    const itemSize = (geometries[0].attributes[name] as THREE.BufferAttribute)
+    const itemSize = (nonIndexed[0].attributes[name] as THREE.BufferAttribute)
       .itemSize;
-    const totalLength = geometries.reduce(
+    const totalLength = nonIndexed.reduce(
       (sum, g) =>
         sum + (g.attributes[name] as THREE.BufferAttribute).array.length,
       0,
     );
     const merged = new Float32Array(totalLength);
     let offset = 0;
-    for (const g of geometries) {
+    for (const g of nonIndexed) {
       const src = (g.attributes[name] as THREE.BufferAttribute).array;
       merged.set(src, offset);
       offset += src.length;
     }
-    result.setAttribute(name, new THREE.BufferAttribute(merged, itemSize));
+    finalGeo.setAttribute(name, new THREE.BufferAttribute(merged, itemSize));
   }
 
-  const totalIndices = geometries.reduce(
-    (sum, g) => sum + g.index!.count,
-    0,
-  );
-  const totalVertices = result.attributes.position.count;
-  const IndexCtor = totalVertices > 65535 ? Uint32Array : Uint16Array;
-  const mergedIndices = new IndexCtor(totalIndices);
-
-  let indexOffset = 0;
+  // Assign geometry groups – each maps an index range to a material
   let vertexOffset = 0;
-  for (let i = 0; i < geometries.length; i++) {
-    const srcIndex = geometries[i].index!.array;
-    const indexCount = geometries[i].index!.count;
-    for (let j = 0; j < indexCount; j++) {
-      mergedIndices[indexOffset + j] = srcIndex[j] + vertexOffset;
-    }
-    indexOffset += indexCount;
-    vertexOffset += vertexCounts[i];
+  for (let i = 0; i < nonIndexed.length; i++) {
+    const count = nonIndexed[i].attributes.position.count;
+    finalGeo.addGroup(vertexOffset, count, i);
+    vertexOffset += count;
   }
 
-  result.setIndex(new THREE.BufferAttribute(mergedIndices, 1));
-  return result;
+  // IMPORTANT: The three-stdlib GLTFExporter only extracts per-group
+  // sub-ranges for INDEXED geometry.  For non-indexed geometry every
+  // primitive receives the full attribute buffers, which breaks
+  // multi-material mapping.  Adding a trivial identity index buffer
+  // [0, 1, 2, …, N-1] forces the exporter down its indexed code path
+  // so each group's start/count correctly selects only its vertices.
+  const totalVertices = finalGeo.attributes.position.count;
+  const indices =
+    totalVertices > 65535
+      ? new Uint32Array(totalVertices)
+      : new Uint16Array(totalVertices);
+  for (let i = 0; i < totalVertices; i++) indices[i] = i;
+  finalGeo.setIndex(new THREE.BufferAttribute(indices, 1));
+
+  const mesh = new THREE.Mesh(finalGeo, materials);
+
+  // Dispose temporaries
+  nonIndexed.forEach((g) => g.dispose());
+
+  return mesh;
 }
