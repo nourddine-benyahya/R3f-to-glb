@@ -1,6 +1,6 @@
 {
   "name": "r3f-glb-exporter",
-  "version": "1.0.24",
+  "version": "1.0.25",
   "private": false,
   "description": "GLB/GLTF export button and utilities for React Three Fiber scenes. Includes automatic cleanup of lights, CSG internals, wireframes, invisible meshes, and more.",
   "main": "dist/index.js",
