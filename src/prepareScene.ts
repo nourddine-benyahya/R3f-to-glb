@@ -21,6 +21,7 @@ const isInvalid = (v: number) => isNaN(v) || !isFinite(v);
  *  1. NaN / Infinity in position, rotation, scale
  *  2. MeshPhysicalMaterial.ior < 1.0 (glTF requires >= 1.0)
  *  3. Custom attributes (prefixed with _) whose count doesn't match position
+ *  4. Invalid texture sources (null, undefined, or not yet loaded)
  */
 function sanitizeForExport(root: THREE.Object3D): void {
   root.traverse((object) => {
@@ -66,6 +67,52 @@ function sanitizeForExport(root: THREE.Object3D): void {
                 `(count ${geo.attributes[key].count} vs position ${expectedCount})`,
             );
             geo.deleteAttribute(key);
+          }
+        }
+      }
+
+      // 4. Remove invalid texture sources (prevents drawImage errors)
+      for (const mat of materials) {
+        if (!mat) continue;
+
+        // Common texture properties to check
+        const textureProps = [
+          'map', 'normalMap', 'roughnessMap', 'metalnessMap',
+          'emissiveMap', 'aoMap', 'bumpMap', 'displacementMap',
+          'specularMap', 'envMap', 'lightMap', 'alphaMap',
+        ];
+
+        for (const prop of textureProps) {
+          if (prop in mat) {
+            const texture = (mat as any)[prop];
+            if (texture && texture.image) {
+              // Check if image is valid
+              const img = texture.image;
+              const isValid =
+                img instanceof HTMLImageElement ||
+                img instanceof HTMLCanvasElement ||
+                img instanceof ImageBitmap ||
+                img instanceof OffscreenCanvas ||
+                (typeof HTMLVideoElement !== 'undefined' && img instanceof HTMLVideoElement);
+
+              if (!isValid) {
+                console.warn(
+                  `[GLB Export] Removing invalid texture "${prop}" from material on mesh "${object.name || object.uuid}"`,
+                );
+                (mat as any)[prop] = null;
+              } else if (img instanceof HTMLImageElement && !img.complete) {
+                console.warn(
+                  `[GLB Export] Removing not-yet-loaded texture "${prop}" from material on mesh "${object.name || object.uuid}"`,
+                );
+                (mat as any)[prop] = null;
+              }
+            } else if (texture && !texture.image) {
+              // Texture exists but has no image
+              console.warn(
+                `[GLB Export] Removing texture "${prop}" with no image source from material on mesh "${object.name || object.uuid}"`,
+              );
+              (mat as any)[prop] = null;
+            }
           }
         }
       }

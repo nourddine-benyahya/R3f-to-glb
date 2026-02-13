@@ -28,19 +28,32 @@ export function removeUnwantedObjects(
 
   const toRemove: THREE.Object3D[] = [];
 
+  // Diagnostic counters
+  let helperCount = 0;
+  let cameraCount = 0;
+  let lightCount = 0;
+  let invisibleMeshCount = 0;
+  let transparentMatCount = 0;
+  let hiddenMatCount = 0;
+  let lineCount = 0;
+  let wireframeCount = 0;
+
   clone.traverse((child) => {
     // Remove helpers (GridHelper, AxesHelper, BoxHelper, etc.)
     if (removeHelpers && child.type.includes('Helper')) {
+      helperCount++;
       toRemove.push(child);
     }
 
     // Remove cameras
     if (removeCameras && child instanceof THREE.Camera) {
+      cameraCount++;
       toRemove.push(child);
     }
 
     // Remove lights and their targets (prevents sun/sun.001 in export)
     if (removeLights && child instanceof THREE.Light) {
+      lightCount++;
       toRemove.push(child);
       if (
         'target' in child &&
@@ -56,6 +69,7 @@ export function removeUnwantedObjects(
       child instanceof THREE.Mesh &&
       !child.visible
     ) {
+      invisibleMeshCount++;
       toRemove.push(child);
     }
 
@@ -73,11 +87,13 @@ export function removeUnwantedObjects(
         'transparent' in mat
       ) {
         if (mat.transparent && mat.opacity === 0) {
+          transparentMatCount++;
           toRemove.push(child);
         }
       }
       // Also check meshBasicMaterial with visible=false
       if (mat && !Array.isArray(mat) && 'visible' in mat && !mat.visible) {
+        hiddenMatCount++;
         toRemove.push(child);
       }
     }
@@ -89,6 +105,7 @@ export function removeUnwantedObjects(
         child.type === 'Line2' ||
         child.type === 'Line')
     ) {
+      lineCount++;
       toRemove.push(child);
     }
 
@@ -105,10 +122,19 @@ export function removeUnwantedObjects(
           (m) => m && 'wireframe' in m && (m as any).wireframe === true,
         );
       if (allWireframe) {
+        wireframeCount++;
         toRemove.push(child);
       }
     }
   });
+
+  console.log(
+    `[GLB Export] removeUnwantedObjects breakdown: ` +
+      `helpers=${helperCount}, cameras=${cameraCount}, lights=${lightCount}, ` +
+      `invisibleMeshes=${invisibleMeshCount}, transparentMat=${transparentMatCount}, ` +
+      `hiddenMat=${hiddenMatCount}, lines=${lineCount}, wireframes=${wireframeCount}, ` +
+      `total=${toRemove.length}`,
+  );
 
   // Safely remove collected objects after traversal
   toRemove.forEach((obj) => obj.removeFromParent());
