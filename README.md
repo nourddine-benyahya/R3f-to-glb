@@ -15,33 +15,96 @@ npm install r3f-glb-exporter
 Your project must already have these installed:
 
 ```bash
-npm install react react-dom three @react-three/fiber @react-three/drei
+npm install react react-dom three @react-three/fiber
 ```
 
-## Quick Start
+> **Note:** `@react-three/drei` is **not** required. The export button works as a standard HTML element outside the Canvas.
 
-Add `<ExportButton />` inside your `<Canvas>` and a download button appears in the corner of your scene:
+## Quick Start (Provider + Consumer Pattern)
+
+Wrap your app with `<SceneProvider>`, place `<SceneCapture />` inside the Canvas to bridge the scene, and put `<ExportButton />` **anywhere** you want — sidebar, toolbar, header, etc.
 
 ```tsx
+import React from 'react';
 import { Canvas } from '@react-three/fiber';
-import { ExportButton } from 'r3f-glb-exporter';
+import { SceneProvider, SceneCapture, ExportButton } from 'r3f-glb-exporter';
 
 function App() {
   return (
-    <Canvas>
-      <ambientLight />
-      <mesh>
-        <boxGeometry />
-        <meshStandardMaterial color="orange" />
-      </mesh>
+    <SceneProvider>
+      <div style={{ display: 'flex' }}>
 
-      <ExportButton filename="my-model" />
-    </Canvas>
+        {/* Button in a sidebar — outside the Canvas */}
+        <aside style={{ padding: 20 }}>
+          <h2>Controls</h2>
+          <ExportButton filename="my-model" />
+        </aside>
+
+        <main style={{ flex: 1 }}>
+          <Canvas>
+            {/* Bridges the R3F scene to the provider */}
+            <SceneCapture />
+
+            <ambientLight />
+            <mesh>
+              <boxGeometry />
+              <meshStandardMaterial color="orange" />
+            </mesh>
+          </Canvas>
+        </main>
+
+      </div>
+    </SceneProvider>
   );
 }
 ```
 
-Click the download icon button and a `my-model.glb` file is saved to your downloads.
+Click the download icon and a `my-model.glb` is saved to your downloads.
+
+### Using an External Scene Ref
+
+For complex setups you can pass your own ref to the provider:
+
+```tsx
+import React, { useRef } from 'react';
+import * as THREE from 'three';
+import { SceneProvider, SceneCapture, ExportButton } from 'r3f-glb-exporter';
+
+function App() {
+  const sceneRef = useRef<THREE.Scene | null>(null);
+
+  return (
+    <SceneProvider sceneRef={sceneRef}>
+      <ExportButton filename="dashboard-model" />
+      <Canvas>
+        <SceneCapture />
+        {/* your scene */}
+      </Canvas>
+    </SceneProvider>
+  );
+}
+```
+
+### Using the Hook Directly
+
+Build your own UI with the `useGLBExport` hook — it works anywhere inside a `<SceneProvider>`:
+
+```tsx
+import { useGLBExport } from 'r3f-glb-exporter';
+
+function CustomDownloadButton() {
+  const { exportScene, isExporting, error } = useGLBExport();
+
+  return (
+    <button
+      onClick={() => exportScene({ filename: 'my-door' })}
+      disabled={isExporting}
+    >
+      {isExporting ? 'Exporting...' : 'Download GLB'}
+    </button>
+  );
+}
+```
 
 ## ExportButton Props
 
@@ -50,18 +113,17 @@ Click the download icon button and a `my-model.glb` file is saved to your downlo
 | Prop | Type | Default | Description |
 |------|------|---------|-------------|
 | `filename` | `string` | `"scene"` | Output filename (without `.glb` extension) |
-| `position` | `"top-left"` \| `"top-right"` \| `"bottom-left"` \| `"bottom-right"` | `"top-right"` | Where the button appears on screen |
 | `showStats` | `boolean` | `true` | Log scene stats (vertices, triangles, meshes, textures) to the console after export |
 | `style` | `React.CSSProperties` | `undefined` | Custom CSS styles for the button |
 | `className` | `string` | `undefined` | Custom CSS class name |
-| `options` | `GLBExportOptions` | `{}` | Advanced export options (see below) |
+| `children` | `React.ReactNode` | SVG icon | Custom button content (replaces default icon) |
 
 ### Scene Cleanup Props
 
 These control what gets removed from the scene before export. **All default to `true`**, which gives you the cleanest possible output. Set any to `false` to keep those objects in the export:
 
 | Prop | Type | Default | What it does |
-|------|------|---------|--------------|
+|------|------|---------|--------------| 
 | `removeHelpers` | `boolean` | `true` | Removes GridHelper, AxesHelper, BoxHelper, and other helper objects |
 | `removeCameras` | `boolean` | `true` | Removes camera objects from the export |
 | `removeLights` | `boolean` | `true` | Removes lights and their targets (fixes `sun` / `sun.001` nodes that show up in Blender) |
@@ -77,7 +139,6 @@ These control what gets removed from the scene before export. **All default to `
 ```tsx
 <ExportButton
   filename="my-scene"
-  position="bottom-left"
   removeLights={false}         // keep lights in the export
   removeCSGChildren={false}    // keep CSG child meshes
   assignReadableNames={false}  // keep original Three.js names
@@ -162,7 +223,7 @@ console.log(stats);
 
 ## GLBExportOptions
 
-These are the advanced options you can pass to `exportToGLB` or `exportToGLBBlob`, or via the `options` prop on `ExportButton`:
+These are the advanced options you can pass to `exportToGLB` or `exportToGLBBlob`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|

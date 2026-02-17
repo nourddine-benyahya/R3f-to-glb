@@ -26,7 +26,6 @@ export default {
     /^react(\/.*)?$/,
     /^react-dom(\/.*)?$/,
     /^@react-three\/fiber(\/.*)?$/,
-    /^@react-three\/drei(\/.*)?$/,
     "three",
   ],
 
