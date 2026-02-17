@@ -54,6 +54,16 @@ function sanitizeForExport(root: THREE.Object3D): void {
         ) {
           (mat as any).ior = 1.0;
         }
+
+        // Fix string colors → THREE.Color (R3F sometimes passes strings like "red")
+        if (
+          mat &&
+          'color' in mat &&
+          (mat as any).color &&
+          !((mat as any).color instanceof THREE.Color)
+        ) {
+          (mat as any).color = new THREE.Color((mat as any).color);
+        }
       }
 
       // 3. Remove custom attributes with mismatched vertex counts
@@ -64,7 +74,7 @@ function sanitizeForExport(root: THREE.Object3D): void {
           if (key.startsWith('_') && geo.attributes[key].count !== expectedCount) {
             console.warn(
               `[GLB Export] Removing attribute "${key}" from mesh "${object.name || object.uuid}" ` +
-                `(count ${geo.attributes[key].count} vs position ${expectedCount})`,
+              `(count ${geo.attributes[key].count} vs position ${expectedCount})`,
             );
             geo.deleteAttribute(key);
           }
