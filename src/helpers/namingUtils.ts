@@ -123,7 +123,6 @@ function getGeometryLabel(geo: THREE.BufferGeometry | undefined): string {
  */
 export function assignReadableNames(clone: THREE.Scene): void {
   const textureCounts: Record<string, number> = {};
-  const materialCounts: Record<string, number> = {};
   const geometryCounts: Record<string, number> = {};
   const objectCounts: Record<string, number> = {};
 
