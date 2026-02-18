@@ -180,7 +180,7 @@ export function assignReadableNames(clone: THREE.Scene): void {
       baseName += `_${colorHex}`;       // e.g. "Standard_#ff0000"
     }
 
-    mat.name = getUniqueName(materialCounts, baseName);
+    mat.name = baseName;
   };
 
   // ── Pass 3: Name Geometries ────────────────────────────────────
