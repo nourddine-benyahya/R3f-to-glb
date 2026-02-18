@@ -141,6 +141,59 @@ export function removeUnwantedObjects(
 }
 
 /**
+ * Returns true when an Object3D has at least one Mesh descendant
+ * (used to decide whether a group is "empty" for export purposes).
+ */
+function hasMeshDescendant(obj: THREE.Object3D): boolean {
+  if (obj instanceof THREE.Mesh) return true;
+  for (const child of obj.children) {
+    if (hasMeshDescendant(child)) return true;
+  }
+  return false;
+}
+
+/**
+ * Removes Group / Object3D nodes that contain no Mesh descendants after
+ * all other cleanup steps.  Iterates until no more empty groups exist so
+ * that newly-emptied parent groups are also removed.
+ */
+export function removeEmptyGroups(clone: THREE.Scene): void {
+  let totalRemoved = 0;
+  let pass = 0;
+
+  // Repeat until a full pass finds nothing to remove (handles nested empty groups)
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    pass++;
+    const toRemove: THREE.Object3D[] = [];
+
+    clone.traverse((child) => {
+      // Only target non-Mesh containers (Groups and plain Object3Ds)
+      if (child === clone) return;
+      if (child instanceof THREE.Mesh) return;
+      if (!hasMeshDescendant(child)) {
+        toRemove.push(child);
+      }
+    });
+
+    if (toRemove.length === 0) break;
+
+    toRemove.forEach((obj) => obj.removeFromParent());
+    totalRemoved += toRemove.length;
+
+    if (pass > 20) {
+      // Safety valve – should never be needed in practice
+      console.warn('[GLB Export] removeEmptyGroups: exceeded 20 passes, stopping.');
+      break;
+    }
+  }
+
+  console.log(
+    `[GLB Export] removeEmptyGroups: removed ${totalRemoved} empty group(s) in ${pass} pass(es)`,
+  );
+}
+
+/**
  * Removes CSG internal children from meshes.
  *
  * @react-three/csg wraps operands (Base, Subtraction) inside a Group

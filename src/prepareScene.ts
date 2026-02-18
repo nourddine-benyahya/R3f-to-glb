@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { PrepareSceneOptions } from './types';
-import { removeUnwantedObjects, removeCSGChildren } from './helpers/sceneCleanup';
+import { removeUnwantedObjects, removeCSGChildren, removeEmptyGroups } from './helpers/sceneCleanup';
+import { deduplicateMaterials } from './helpers/materialDedup';
 import { assignReadableNames } from './helpers/namingUtils';
 import { mergeExportGroups } from './helpers/meshMerger';
 import { logSceneHierarchy } from './helpers/debug';
@@ -147,6 +148,8 @@ export function prepareSceneForExport(
     removeWireframeMeshes = true,
     assignReadableNames: shouldAssignNames = true,
     mergeMeshesInGroups = true,
+    removeEmptyGroups: shouldRemoveEmptyGroups = true,
+    deduplicateMaterials: shouldDeduplicateMaterials = true,
   } = options;
 
   // --- Diagnostic: count meshes in original scene ---
@@ -194,12 +197,22 @@ export function prepareSceneForExport(
     assignReadableNames(clone);
   }
 
-  // 4. Merge meshes inside "exportGroup" groups
+  // 4. Deduplicate materials that share the same name (must run after naming)
+  if (shouldDeduplicateMaterials) {
+    deduplicateMaterials(clone);
+  }
+
+  // 5. Merge meshes inside "exportGroup" groups
   if (mergeMeshesInGroups) {
     mergeExportGroups(clone);
   }
   const afterMerge = countMeshes(clone);
   console.log(`[GLB Export] After merge: ${afterMerge} mesh(es)`);
+
+  // 6. Remove groups that have no mesh descendants after all cleanup
+  if (shouldRemoveEmptyGroups) {
+    removeEmptyGroups(clone);
+  }
 
   console.log('[GLB Export] Scene structure AFTER cleanup:');
   logSceneHierarchy(clone, 0, 3);

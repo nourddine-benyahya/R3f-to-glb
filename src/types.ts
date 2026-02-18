@@ -63,4 +63,17 @@ export interface PrepareSceneOptions {
    * When false, exports the scene as-is without any merging. Default: true
    */
   mergeMeshesInGroups?: boolean;
+  /**
+   * Remove groups (and Object3D nodes) that have no visible mesh descendants
+   * after all other cleanup steps. Empty groups produce useless nodes in
+   * Blender / game engines. Default: true
+   */
+  removeEmptyGroups?: boolean;
+  /**
+   * Deduplicate materials, textures and colors by name: when two materials
+   * share the same resolved name the second mesh is reassigned to reuse the
+   * first material instead of keeping a separate copy.  Prevents _1 / _2
+   * postfix duplicates in Blender. Default: true
+   */
+  deduplicateMaterials?: boolean;
 }
